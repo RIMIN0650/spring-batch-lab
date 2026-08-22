@@ -1,3 +1,36 @@
 spring:
   application:
     name: batch-lab
+  batch:
+    job:
+      enabled: false
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    defer-datasource-initialization: true
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASS}
+    driver-class-name: ${DB_DRIVER}
+    meta:
+      jdbc-url: ${DB_URL_META}
+      username: ${DB_USER_META}
+      password: ${DB_PASS_META}
+      driver-class-name: ${DB_DRIVER_META}
+    data:
+      jdbc-url: ${DB_URL_DATA}
+      username: ${DB_USER_DATA}
+      password: ${DB_PASS_DATA}
+      driver-class-name: ${DB_DRIVER_DATA}
+
+server:
+  port: 8080
+
+
+logging:
+  level:
+    org.springframework.security: DEBUG
+billing:
+  secret-key: ${SECRET_KEY}
