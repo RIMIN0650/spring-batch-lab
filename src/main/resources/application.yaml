@@ -4,6 +4,9 @@ spring:
   batch:
     job:
       enabled: false
+      name: billingJob
+    jdbc:
+      initialize-schema: always
   jpa:
     hibernate:
       ddl-auto: update

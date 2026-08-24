@@ -44,6 +44,10 @@ public class DataDBConfig {
         properties.put("hibernate.show_sql", "true");
         em.setJpaPropertyMap(properties);
 
+        // 쿼리 실행 횟수 세기 위함
+        properties.put("hibernate.generate_statistics", "true");
+        em.setJpaPropertyMap(properties);
+
         return em;
     }
 

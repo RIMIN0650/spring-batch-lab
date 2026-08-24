@@ -47,7 +47,7 @@ public class FailedPaymentRetryBatch {
     @Value("${billing.secret-key}")
     private String secretKey;
 
-    private static final String DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1507205093588598854/R0K4NtHWlK5MU9rLs5hWq8urwlundf8GTXsKqCKMr3PuHvpP3mj4Soneg0ZPXP4VdM11";
+    private static final String DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1540712775842529400/Bl04p8VeJacw5dB6qgyMxA0lZJgXCv9kDxmsIAww-QNGTcCcHpaap9MvwP7vz8J6Xcl4";
 
     public record RetryRequestDto(
             Long failedPaymentIdx,
