@@ -4,10 +4,7 @@ import com.example.batchlab.model.AfterBilling;
 import com.example.batchlab.model.Billing;
 import com.example.batchlab.model.FailedPayment;
 import com.example.batchlab.model.Store;
-import com.example.batchlab.repository.AfterBillingRepository;
-import com.example.batchlab.repository.BillingRepository;
-import com.example.batchlab.repository.FailedPaymentRepository;
-import com.example.batchlab.repository.StoreRepository;
+import com.example.batchlab.repository.*;
 import com.example.batchlab.service.OrdersService;
 import jakarta.persistence.EntityManagerFactory;
 import lombok.NonNull;
@@ -54,6 +51,7 @@ public class BillingBatch {
     private final AfterBillingRepository afterBillingRepository;
     private final FailedPaymentRepository failedPaymentRepository;
     private final EntityManagerFactory entityManagerFactory;
+    private final OrdersRepository ordersRepository;
 
     @Value("${billing.secret-key}")
     private String secretKey;
@@ -242,13 +240,19 @@ public class BillingBatch {
             Long storeIdx = store.getIdx();
             String currentMonth = YearMonth.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
 
+            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime startDate = now.withDayOfMonth(1).withHour(0).withMinute(0).withSecond(0).withNano(0);
+            LocalDateTime endDate = startDate.plusMonths(1);
+
+            int totalPayAmount = ordersRepository.sumPriceByStoreAndPeriod(storeIdx, startDate, endDate);
+
             if (afterBillingRepository.existsByStoreIdxAndPayedMonthAndIsSuccessTrue(storeIdx, currentMonth)) {
                 System.out.println("SKIP: 가맹점 " + storeIdx + "는 이미 " + currentMonth + " 정산 완료(성공) 데이터가 존재합니다.");
                 results.add(new SettlementResult(storeIdx, 0, true, "이미 정산 완료됨 (Skip)"));
                 return null;
             }
 
-            int totalPayAmount = ordersService.totalPayAmount(storeIdx);
+//            int totalPayAmount = ordersService.totalPayAmount(storeIdx);
             Billing target = billingRepository.findByStoreIdx(storeIdx);
 
             // 결제 정보가 없더라도 null을 반환하지 않고 DTO를 생성하여 Writer로 넘김
