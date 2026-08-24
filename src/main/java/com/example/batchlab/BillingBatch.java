@@ -58,7 +58,17 @@ public class BillingBatch {
     @Value("${billing.secret-key}")
     private String secretKey;
 
-    private static final String DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1507205093588598854/R0K4NtHWlK5MU9rLs5hWq8urwlundf8GTXsKqCKMr3PuHvpP3mj4Soneg0ZPXP4VdM11";
+    private static final String DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1540712775842529400/Bl04p8VeJacw5dB6qgyMxA0lZJgXCv9kDxmsIAww-QNGTcCcHpaap9MvwP7vz8J6Xcl4";
+
+
+    public void printQueryStats() {
+        var stats = entityManagerFactory.unwrap(org.hibernate.SessionFactory.class).getStatistics();
+        System.out.println("Query Execution Count: " + stats.getQueryExecutionCount());
+        System.out.println("Entity Fetch Count: " + stats.getEntityFetchCount());
+    }
+
+
+
 
     // Processor에서 Writer로 데이터를 전달하기 위한 DTO
     public record BillingRequestDto(
@@ -95,6 +105,7 @@ public class BillingBatch {
             @Override
             public void beforeJob(JobExecution jobExecution) {
                 results.clear(); // 결과 리스트 초기화
+                entityManagerFactory.unwrap(org.hibernate.SessionFactory.class).getStatistics().clear();
                 sendDiscordMessage("🚀 [정산 배치] 작업 시작 - 일시: " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
             }
 
@@ -107,6 +118,8 @@ public class BillingBatch {
                 long successCount = results.stream().filter(SettlementResult::isSuccess).count();
                 long failCount = results.stream().filter(r -> !r.isSuccess()).count();
 
+                var stats = entityManagerFactory.unwrap(org.hibernate.SessionFactory.class).getStatistics();
+
                 StringBuilder sb = new StringBuilder();
                 sb.append("✅ [정산 배치] 작업 종료\n");
                 sb.append("- 상태: ").append(status).append("\n");
@@ -115,6 +128,7 @@ public class BillingBatch {
                 sb.append("- 총 건수: ").append(results.size()).append("\n");
                 sb.append("- 성공: ").append(successCount).append("\n");
                 sb.append("- 실패: ").append(failCount).append("\n");
+                sb.append("\"배치 작업 중 실행된 쿼리 수: ").append(stats.getQueryExecutionCount());
                 
                 if (!jobExecution.getAllFailureExceptions().isEmpty()) {
                     sb.append("- 치명적 에러: ").append(jobExecution.getAllFailureExceptions().get(0).getMessage()).append("\n");
@@ -210,7 +224,14 @@ public class BillingBatch {
 
         return () -> {
             Store store = delegate.read();
-            System.out.println("READER READ = " + (store != null ? store.getIdx() : "NULL"));
+
+            if (store != null) {
+                System.out.println("DEBUG: READER READ SUCCESS = " + store.getIdx());
+            } else {
+                System.out.println("DEBUG: READER READ = NULL (데이터 없음)");
+            }
+
+//            System.out.println("READER READ = " + (store != null ? store.getIdx() : "NULL"));
             return store;
         };
     }
@@ -268,14 +289,14 @@ public class BillingBatch {
                             .build();
 
                     // 1. 결제 정보가 없는 경우 처리
-                    if (!req.hasBillingInfo()) {
-                        afterBilling.setIsPaid(false);
-                        afterBilling.setIsSuccess(false);
-                        afterBilling.setFailReason("가맹점 결제 정보(Billing)가 존재하지 않습니다.");
-                        afterBillingRepository.save(afterBilling);
-                        results.add(new SettlementResult(req.storeIdx(), req.totalPayAmount(), false, "결제 정보 없음"));
-                        continue;
-                    }
+//                    if (!req.hasBillingInfo()) {
+//                        afterBilling.setIsPaid(false);
+//                        afterBilling.setIsSuccess(false);
+//                        afterBilling.setFailReason("가맹점 결제 정보(Billing)가 존재하지 않습니다.");
+//                        afterBillingRepository.save(afterBilling);
+//                        results.add(new SettlementResult(req.storeIdx(), req.totalPayAmount(), false, "결제 정보 없음"));
+//                        continue;
+//                    }
 
                     try {
                         // 2. 금액이 0원 이하인 경우 (선택 사항)
@@ -289,16 +310,16 @@ public class BillingBatch {
                         }
 
                         // 3. 결제 API 호출
-                        Map<String, Object> map = new HashMap<>();
-                        map.put("customerKey", req.customerKey());
-                        map.put("amount", req.totalPayAmount());
-                        map.put("orderId", UUID.randomUUID().toString());
-                        map.put("orderName", "지난 달 정산 결제");
-
-                        HttpEntity<Map<String, Object>> request = new HttpEntity<>(map, headers);
-                        String url = "https://api.tosspayments.com/v1/billing/" + req.billingKey();
-
-                        ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
+//                        Map<String, Object> map = new HashMap<>();
+//                        map.put("customerKey", req.customerKey());
+//                        map.put("amount", req.totalPayAmount());
+//                        map.put("orderId", UUID.randomUUID().toString());
+//                        map.put("orderName", "지난 달 정산 결제");
+//
+//                        HttpEntity<Map<String, Object>> request = new HttpEntity<>(map, headers);
+//                        String url = "https://api.tosspayments.com/v1/billing/" + req.billingKey();
+//
+//                        ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
                         
                         // 성공 기록
                         afterBilling.setIsPaid(true);
