@@ -26,6 +26,8 @@ import org.springframework.batch.infrastructure.item.data.builder.RepositoryItem
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -52,6 +54,8 @@ public class BillingBatch {
     private final FailedPaymentRepository failedPaymentRepository;
     private final EntityManagerFactory entityManagerFactory;
     private final OrdersRepository ordersRepository;
+
+    private final Map<Long, Integer> totalPriceMap = new HashMap<>();
 
     @Value("${billing.secret-key}")
     private String secretKey;
@@ -197,7 +201,7 @@ public class BillingBatch {
     @Bean
     public Step billingStep() {
         return new StepBuilder("billingStep", jobRepository)
-                .<Store, BillingRequestDto>chunk(5, platformTransactionManager)
+                .<Store, BillingRequestDto>chunk(100, platformTransactionManager)
                 .reader(storeIdReader())
                 .processor(billingProcessor())
                 .writer(billingWriter(afterBillingRepository))
@@ -209,55 +213,218 @@ public class BillingBatch {
                 .build();
     }
 
+//    @Bean
+//    public ItemReader<Store> storeIdReader() {
+//        RepositoryItemReader<Store> delegate =
+//                new RepositoryItemReaderBuilder<Store>()
+//                        .name("storeIdReader")
+//                        .pageSize(100)
+//                        .methodName("findAll")
+//                        .repository(storeRepository)
+//                        .sorts(Map.of("idx", Sort.Direction.ASC))
+//                        .build();
+//
+//        return () -> {
+//            Store store = delegate.read();
+//
+//            if (store != null) {
+//                System.out.println("DEBUG: READER READ SUCCESS = " + store.getIdx());
+//            } else {
+//                System.out.println("DEBUG: READER READ = NULL (데이터 없음)");
+//            }
+//
+////            System.out.println("READER READ = " + (store != null ? store.getIdx() : "NULL"));
+//            return store;
+//        };
+//    }
+
+
     @Bean
     public ItemReader<Store> storeIdReader() {
-        RepositoryItemReader<Store> delegate =
-                new RepositoryItemReaderBuilder<Store>()
-                        .name("storeIdReader")
-                        .pageSize(5)
-                        .methodName("findAll")
-                        .repository(storeRepository)
-                        .sorts(Map.of("idx", Sort.Direction.ASC))
-                        .build();
 
-        return () -> {
-            Store store = delegate.read();
+        return new ItemReader<Store>() {
 
-            if (store != null) {
-                System.out.println("DEBUG: READER READ SUCCESS = " + store.getIdx());
-            } else {
-                System.out.println("DEBUG: READER READ = NULL (데이터 없음)");
+            private int currentPage = 0;
+            private Iterator<Store> currentStores = Collections.emptyIterator();
+
+            @Override
+            public Store read() {
+
+
+                if (!currentStores.hasNext()) {
+
+                    Page<Store> page = storeRepository.findAll(
+                        PageRequest.of(
+                                currentPage,
+                                100,
+                                Sort.by(Sort.Direction.ASC, "idx")
+                        )
+                    );
+
+                    if (page.isEmpty()) {
+                        System.out.println("DEBUG: READER READ = NULL (데이터 없음)");
+                        return null;
+                    }
+
+                    List<Store> stores = page.getContent();
+
+                    System.out.println(
+                        "DEBUG: BULK PAGE READ - page="
+                                + currentPage
+                                + ", size="
+                                + stores.size()
+                    );
+
+                    List<Long> storeIdxs = stores.stream()
+                        .map(Store::getIdx)
+                        .toList();
+
+
+                    LocalDateTime now = LocalDateTime.now();
+
+                    LocalDateTime startDate = now
+                        .withDayOfMonth(1)
+                        .withHour(0)
+                        .withMinute(0)
+                        .withSecond(0)
+                        .withNano(0);
+
+                    LocalDateTime endDate = startDate.plusMonths(1);
+
+
+                    List<Object[]> results =
+                        ordersRepository.sumPriceByStoreIdxsAndPeriod(
+                                storeIdxs,
+                                startDate,
+                                endDate
+                        );
+
+
+                    totalPriceMap.clear();
+
+                    for (Object[] row : results) {
+
+                        Long storeIdx = ((Number) row[0]).longValue();
+                        Integer totalPrice = ((Number) row[1]).intValue();
+
+                        totalPriceMap.put(storeIdx, totalPrice);
+                    }
+
+                    System.out.println(
+                        "DEBUG: BULK SUM QUERY - storeCount="
+                                + storeIdxs.size()
+                                + ", resultCount="
+                                + results.size()
+                    );
+
+
+                    currentStores = stores.iterator();
+
+                    currentPage++;
+                }
+
+                Store store = currentStores.next();
+
+                System.out.println(
+                        "DEBUG: READER READ SUCCESS = " + store.getIdx()
+                );
+
+                return store;
             }
-
-//            System.out.println("READER READ = " + (store != null ? store.getIdx() : "NULL"));
-            return store;
         };
     }
 
+
+
+//    @Bean
+//    public ItemProcessor<Store, BillingRequestDto> billingProcessor() {
+//        return store -> {
+//            Long storeIdx = store.getIdx();
+//            String currentMonth = YearMonth.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
+//
+//            LocalDateTime now = LocalDateTime.now();
+//            LocalDateTime startDate = now.withDayOfMonth(1).withHour(0).withMinute(0).withSecond(0).withNano(0);
+//            LocalDateTime endDate = startDate.plusMonths(1);
+//
+//            int totalPayAmount = ordersRepository.sumPriceByStoreAndPeriod(storeIdx, startDate, endDate);
+//
+//            if (afterBillingRepository.existsByStoreIdxAndPayedMonthAndIsSuccessTrue(storeIdx, currentMonth)) {
+//                System.out.println("SKIP: 가맹점 " + storeIdx + "는 이미 " + currentMonth + " 정산 완료(성공) 데이터가 존재합니다.");
+//                results.add(new SettlementResult(storeIdx, 0, true, "이미 정산 완료됨 (Skip)"));
+//                return null;
+//            }
+//
+////            int totalPayAmount = ordersService.totalPayAmount(storeIdx);
+//            Billing target = billingRepository.findByStoreIdx(storeIdx);
+//
+//            // 결제 정보가 없더라도 null을 반환하지 않고 DTO를 생성하여 Writer로 넘김
+//            if (target == null) {
+//                return new BillingRequestDto(storeIdx, totalPayAmount, null, null, false);
+//            }
+//
+//            return new BillingRequestDto(
+//                    storeIdx,
+//                    totalPayAmount,
+//                    target.getCustomerKey(),
+//                    target.getBillingKey(),
+//                    true
+//            );
+//        };
+//    }
+
     @Bean
     public ItemProcessor<Store, BillingRequestDto> billingProcessor() {
+
         return store -> {
+
             Long storeIdx = store.getIdx();
-            String currentMonth = YearMonth.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
 
-            LocalDateTime now = LocalDateTime.now();
-            LocalDateTime startDate = now.withDayOfMonth(1).withHour(0).withMinute(0).withSecond(0).withNano(0);
-            LocalDateTime endDate = startDate.plusMonths(1);
+            String currentMonth =
+                    YearMonth.now()
+                            .format(DateTimeFormatter.ofPattern("yyyy-MM"));
 
-            int totalPayAmount = ordersRepository.sumPriceByStoreAndPeriod(storeIdx, startDate, endDate);
+            int totalPayAmount =
+                    totalPriceMap.getOrDefault(storeIdx, 0);
 
-            if (afterBillingRepository.existsByStoreIdxAndPayedMonthAndIsSuccessTrue(storeIdx, currentMonth)) {
-                System.out.println("SKIP: 가맹점 " + storeIdx + "는 이미 " + currentMonth + " 정산 완료(성공) 데이터가 존재합니다.");
-                results.add(new SettlementResult(storeIdx, 0, true, "이미 정산 완료됨 (Skip)"));
+            if (afterBillingRepository
+                    .existsByStoreIdxAndPayedMonthAndIsSuccessTrue(
+                            storeIdx,
+                            currentMonth
+                    )) {
+
+                System.out.println(
+                        "SKIP: 가맹점 "
+                                + storeIdx
+                                + "는 이미 "
+                                + currentMonth
+                                + " 정산 완료(성공) 데이터가 존재합니다."
+                );
+
+                results.add(
+                        new SettlementResult(
+                                storeIdx,
+                                0,
+                                true,
+                                "이미 정산 완료됨 (Skip)"
+                        )
+                );
+
                 return null;
             }
 
-//            int totalPayAmount = ordersService.totalPayAmount(storeIdx);
-            Billing target = billingRepository.findByStoreIdx(storeIdx);
+            Billing target =
+                    billingRepository.findByStoreIdx(storeIdx);
 
-            // 결제 정보가 없더라도 null을 반환하지 않고 DTO를 생성하여 Writer로 넘김
+
             if (target == null) {
-                return new BillingRequestDto(storeIdx, totalPayAmount, null, null, false);
+
+                return new BillingRequestDto(
+                        storeIdx,
+                        totalPayAmount,
+                        null,
+                        null,
+                        false
+                );
             }
 
             return new BillingRequestDto(
