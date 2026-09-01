@@ -4,10 +4,7 @@ import com.example.batchlab.model.AfterBilling;
 import com.example.batchlab.model.Billing;
 import com.example.batchlab.model.FailedPayment;
 import com.example.batchlab.model.Store;
-import com.example.batchlab.repository.AfterBillingRepository;
-import com.example.batchlab.repository.BillingRepository;
-import com.example.batchlab.repository.FailedPaymentRepository;
-import com.example.batchlab.repository.StoreRepository;
+import com.example.batchlab.repository.*;
 import com.example.batchlab.service.OrdersService;
 import jakarta.persistence.EntityManagerFactory;
 import lombok.NonNull;
@@ -29,6 +26,8 @@ import org.springframework.batch.infrastructure.item.data.builder.RepositoryItem
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -54,6 +53,13 @@ public class BillingBatch {
     private final AfterBillingRepository afterBillingRepository;
     private final FailedPaymentRepository failedPaymentRepository;
     private final EntityManagerFactory entityManagerFactory;
+    private final OrdersRepository ordersRepository;
+
+    private final Map<Long, Integer> totalPriceMap = new HashMap<>();
+
+    private final Set<Long> alreadySettledStores = new HashSet<>();
+
+    private final Map<Long, Billing> billingMap = new HashMap<>();
 
     @Value("${billing.secret-key}")
     private String secretKey;
@@ -104,7 +110,7 @@ public class BillingBatch {
 
             @Override
             public void beforeJob(JobExecution jobExecution) {
-                results.clear(); // 결과 리스트 초기화
+                results.clear();
                 entityManagerFactory.unwrap(org.hibernate.SessionFactory.class).getStatistics().clear();
                 sendDiscordMessage("🚀 [정산 배치] 작업 시작 - 일시: " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
             }
@@ -180,8 +186,7 @@ public class BillingBatch {
                     headers.setContentType(MediaType.MULTIPART_FORM_DATA);
 
                     org.springframework.util.LinkedMultiValueMap<String, Object> body = new org.springframework.util.LinkedMultiValueMap<>();
-                    
-                    // 파일 파트 구성
+
                     HttpHeaders fileHeaders = new HttpHeaders();
                     fileHeaders.setContentDispositionFormData("file", "settlement_report.md");
                     HttpEntity<byte[]> fileEntity = new HttpEntity<>(content.getBytes(), fileHeaders);
@@ -199,7 +204,7 @@ public class BillingBatch {
     @Bean
     public Step billingStep() {
         return new StepBuilder("billingStep", jobRepository)
-                .<Store, BillingRequestDto>chunk(5, platformTransactionManager)
+                .<Store, BillingRequestDto>chunk(100, platformTransactionManager)
                 .reader(storeIdReader())
                 .processor(billingProcessor())
                 .writer(billingWriter(afterBillingRepository))
@@ -211,49 +216,241 @@ public class BillingBatch {
                 .build();
     }
 
+
+
     @Bean
     public ItemReader<Store> storeIdReader() {
-        RepositoryItemReader<Store> delegate =
-                new RepositoryItemReaderBuilder<Store>()
-                        .name("storeIdReader")
-                        .pageSize(5)
-                        .methodName("findAll")
-                        .repository(storeRepository)
-                        .sorts(Map.of("idx", Sort.Direction.ASC))
-                        .build();
 
-        return () -> {
-            Store store = delegate.read();
+        return new ItemReader<Store>() {
 
-            if (store != null) {
-                System.out.println("DEBUG: READER READ SUCCESS = " + store.getIdx());
-            } else {
-                System.out.println("DEBUG: READER READ = NULL (데이터 없음)");
+            private int currentPage = 0;
+            private Iterator<Store> currentStores =
+                    Collections.emptyIterator();
+
+            @Override
+            public Store read() {
+
+                if (!currentStores.hasNext()) {
+
+                    Page<Store> page = storeRepository.findAll(
+                            PageRequest.of(
+                                    currentPage,
+                                    100,
+                                    Sort.by(
+                                            Sort.Direction.ASC,
+                                            "idx"
+                                    )
+                            )
+                    );
+
+                    if (page.isEmpty()) {
+
+                        System.out.println(
+                                "DEBUG: READER READ = NULL (데이터 없음)"
+                        );
+
+                        return null;
+                    }
+
+                    List<Store> stores = page.getContent();
+
+                    System.out.println(
+                            "DEBUG: BULK PAGE READ - page="
+                                    + currentPage
+                                    + ", size="
+                                    + stores.size()
+                    );
+
+                    List<Long> storeIdxs = stores.stream()
+                            .map(Store::getIdx)
+                            .toList();
+
+                    LocalDateTime now = LocalDateTime.now();
+
+                    LocalDateTime startDate = now
+                            .withDayOfMonth(1)
+                            .withHour(0)
+                            .withMinute(0)
+                            .withSecond(0)
+                            .withNano(0);
+
+                    LocalDateTime endDate =
+                            startDate.plusMonths(1);
+
+
+                    List<Object[]> orderResults =
+                            ordersRepository
+                                    .sumPriceByStoreIdxsAndPeriod(
+                                            storeIdxs,
+                                            startDate,
+                                            endDate
+                                    );
+
+
+
+                    totalPriceMap.clear();
+
+
+                    for (Object[] row : orderResults) {
+
+                        Long storeIdx =
+                                ((Number) row[0]).longValue();
+
+                        Integer totalPrice =
+                                ((Number) row[1]).intValue();
+
+                        totalPriceMap.put(
+                                storeIdx,
+                                totalPrice
+                        );
+                    }
+
+
+                    System.out.println(
+                            "DEBUG: ORDERS BULK QUERY - "
+                                    + "storeCount="
+                                    + storeIdxs.size()
+                                    + ", resultCount="
+                                    + orderResults.size()
+                    );
+
+
+                    String currentMonth =
+                            YearMonth.now()
+                                    .format(
+                                            DateTimeFormatter.ofPattern(
+                                                    "yyyy-MM"
+                                            )
+                                    );
+
+
+                    alreadySettledStores.clear();
+
+
+                    List<Long> settledStoreIdxs =
+                            afterBillingRepository
+                                    .findSuccessfulStoreIdxs(
+                                            storeIdxs,
+                                            currentMonth
+                                    );
+
+
+                    alreadySettledStores.addAll(
+                            settledStoreIdxs
+                    );
+
+
+                    System.out.println(
+                            "DEBUG: AFTER_BILLING BULK QUERY - "
+                                    + "storeCount="
+                                    + storeIdxs.size()
+                                    + ", settledCount="
+                                    + settledStoreIdxs.size()
+                    );
+
+
+                    billingMap.clear();
+
+                    List<Billing> billingResults =
+                            billingRepository.findByStoreIdxIn(storeIdxs);
+
+                    for (Billing billing : billingResults) {
+                        billingMap.put(
+                                billing.getStoreIdx(),
+                                billing
+                        );
+                    }
+
+                    System.out.println(
+                            "DEBUG: BILLING BULK QUERY - "
+                                    + "storeCount="
+                                    + storeIdxs.size()
+                                    + ", resultCount="
+                                    + billingResults.size()
+                    );
+
+
+                    currentStores =
+                            stores.iterator();
+
+                    currentPage++;
+                }
+
+
+                Store store =
+                        currentStores.next();
+
+
+                System.out.println(
+                        "DEBUG: READER READ SUCCESS = "
+                                + store.getIdx()
+                );
+
+
+                return store;
             }
-
-//            System.out.println("READER READ = " + (store != null ? store.getIdx() : "NULL"));
-            return store;
         };
     }
 
+
+
+
+
     @Bean
     public ItemProcessor<Store, BillingRequestDto> billingProcessor() {
-        return store -> {
-            Long storeIdx = store.getIdx();
-            String currentMonth = YearMonth.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
 
-            if (afterBillingRepository.existsByStoreIdxAndPayedMonthAndIsSuccessTrue(storeIdx, currentMonth)) {
-                System.out.println("SKIP: 가맹점 " + storeIdx + "는 이미 " + currentMonth + " 정산 완료(성공) 데이터가 존재합니다.");
-                results.add(new SettlementResult(storeIdx, 0, true, "이미 정산 완료됨 (Skip)"));
+        return store -> {
+
+            Long storeIdx = store.getIdx();
+
+
+            int totalPayAmount =
+                    totalPriceMap.getOrDefault(
+                            storeIdx,
+                            0
+                    );
+
+
+            String currentMonth =
+                    YearMonth.now()
+                            .format(
+                                    DateTimeFormatter.ofPattern("yyyy-MM")
+                            );
+
+            if (alreadySettledStores.contains(storeIdx)) {
+
+                System.out.println(
+                        "SKIP: 가맹점 "
+                                + storeIdx
+                                + "는 이미 "
+                                + currentMonth
+                                + " 정산 완료(성공) 데이터가 존재합니다."
+                );
+
+                results.add(
+                        new SettlementResult(
+                                storeIdx,
+                                0,
+                                true,
+                                "이미 정산 완료됨 (Skip)"
+                        )
+                );
+
                 return null;
             }
 
-            int totalPayAmount = ordersService.totalPayAmount(storeIdx);
-            Billing target = billingRepository.findByStoreIdx(storeIdx);
+            Billing target =
+                    billingMap.get(storeIdx);
 
-            // 결제 정보가 없더라도 null을 반환하지 않고 DTO를 생성하여 Writer로 넘김
             if (target == null) {
-                return new BillingRequestDto(storeIdx, totalPayAmount, null, null, false);
+
+                return new BillingRequestDto(
+                        storeIdx,
+                        totalPayAmount,
+                        null,
+                        null,
+                        false
+                );
             }
 
             return new BillingRequestDto(
@@ -265,6 +462,8 @@ public class BillingBatch {
             );
         };
     }
+
+
 
     @Bean
     public ItemWriter<BillingRequestDto> billingWriter(AfterBillingRepository afterBillingRepository) {
@@ -288,18 +487,9 @@ public class BillingBatch {
                             .createdAt(LocalDateTime.now())
                             .build();
 
-                    // 1. 결제 정보가 없는 경우 처리
-//                    if (!req.hasBillingInfo()) {
-//                        afterBilling.setIsPaid(false);
-//                        afterBilling.setIsSuccess(false);
-//                        afterBilling.setFailReason("가맹점 결제 정보(Billing)가 존재하지 않습니다.");
-//                        afterBillingRepository.save(afterBilling);
-//                        results.add(new SettlementResult(req.storeIdx(), req.totalPayAmount(), false, "결제 정보 없음"));
-//                        continue;
-//                    }
+
 
                     try {
-                        // 2. 금액이 0원 이하인 경우 (선택 사항)
                         if (req.totalPayAmount() <= 0) {
                             afterBilling.setIsPaid(false);
                             afterBilling.setIsSuccess(false);
@@ -309,19 +499,7 @@ public class BillingBatch {
                             continue;
                         }
 
-                        // 3. 결제 API 호출
-//                        Map<String, Object> map = new HashMap<>();
-//                        map.put("customerKey", req.customerKey());
-//                        map.put("amount", req.totalPayAmount());
-//                        map.put("orderId", UUID.randomUUID().toString());
-//                        map.put("orderName", "지난 달 정산 결제");
-//
-//                        HttpEntity<Map<String, Object>> request = new HttpEntity<>(map, headers);
-//                        String url = "https://api.tosspayments.com/v1/billing/" + req.billingKey();
-//
-//                        ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
-                        
-                        // 성공 기록
+
                         afterBilling.setIsPaid(true);
                         afterBilling.setIsSuccess(true);
                         System.out.println("결제 성공: " + req.storeIdx());
@@ -329,14 +507,12 @@ public class BillingBatch {
                         results.add(new SettlementResult(req.storeIdx(), req.totalPayAmount(), true, "정산 성공"));
 
                     } catch (Exception e) {
-                        // API 호출 실패 시 에러 기록 후 예외를 던져서 Retry 유도
                         System.err.println("결제 API 에러 (재시도 대상): " + req.storeIdx() + " - " + e.getMessage());
                         afterBilling.setIsPaid(false);
                         afterBilling.setIsSuccess(false);
                         afterBilling.setFailReason("API 호출 실패: " + e.getMessage());
                         afterBillingRepository.save(afterBilling);
 
-                        // 1회 결제 실패 테이블에 저장 (중복 체크)
                         String month = YearMonth.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
                         if (!failedPaymentRepository.existsByStoreIdxAndPayedMonth(req.storeIdx(), month)) {
                             FailedPayment failedPayment = FailedPayment.builder()
@@ -348,12 +524,9 @@ public class BillingBatch {
                                     .build();
                             failedPaymentRepository.save(failedPayment);
                         }
-                        
-                        // Retry 전략 시 중복 기록 방지를 위해 리스트에는 최종 실패(Skip 시점)나 성공 시점에만 담는 것이 좋으나,
-                        // 여기서는 일단 담고 나중에 중복 제거 처리하거나 그대로 둠
+
                         results.add(new SettlementResult(req.storeIdx(), req.totalPayAmount(), false, "API 오류: " + e.getMessage()));
-                        
-                        // Exception을 던져야 Spring Batch가 Retry를 인식합니다.
+
                         throw e;
                     }
                 }
